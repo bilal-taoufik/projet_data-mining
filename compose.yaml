@@ -1,0 +1,90 @@
+name: projet-datamining
+
+services:
+
+  # --- Notebooks + Spark ----------------------------------------------------
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: projet-datamining-jupyter:local
+    init: true
+    shm_size: "1gb"
+    container_name: projet-datamining-jupyter
+    ports:
+      - "${JUPYTER_PORT:-18888}:8888"   # JupyterLab -> http://localhost:18888/lab?token=projet
+      - "${SPARK_UI_PORT:-14040}:4040"   # Spark UI   -> http://localhost:14040 (session Spark active)
+    volumes:
+      - .:/home/jovyan/work            # tout le dépôt est visible dans Jupyter
+      - ivy-cache:/home/jovyan/.ivy2   # jars Spark (Delta, S3, JDBC) téléchargés une seule fois
+    command: start-notebook.py --IdentityProvider.token=${JUPYTER_TOKEN:-projet}
+    environment:
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+      PG_URL: jdbc:postgresql://postgres:5432/${PG_DB:-projet_datamining}
+      PG_HOST: postgres
+      SPARK_UI_URL: http://localhost:${SPARK_UI_PORT:-14040}
+      PG_DB: ${PG_DB:-projet_datamining}
+      PG_USER: ${PG_USER:-projet_datamining}
+      PG_PASSWORD: ${PG_PASSWORD:-projet}
+    depends_on:
+      - postgres
+      - rustfs
+
+  # --- Data lake S3 -----------------------------------
+  rustfs-init:            # donne les droits du volume à l'utilisateur RustFS, puis s'arrête
+    image: alpine:3.20
+    container_name: projet-datamining-rustfs-init
+    command: sh -c "chown -R 10001:10001 /data && echo volume pret"
+    volumes:
+      - lake-data:/data
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: projet-datamining-rustfs
+    ports:
+      - "${S3_PORT:-19000}:9000"   # API S3
+      - "${S3_CONSOLE_PORT:-19001}:9001"   # Console web -> http://localhost:19001
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-rustfsadmin}
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"   # un seul disque : usage local uniquement
+    volumes:
+      - lake-data:/data
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
+  # --- Base de restitution --------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: projet-datamining-postgres
+    environment:
+      POSTGRES_USER: ${PG_USER:-projet_datamining}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-projet}
+      POSTGRES_DB: ${PG_DB:-projet_datamining}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  # --- Console web PostgreSQL : voir les tables, lancer du SQL --------------------
+  adminer:
+    image: adminer:latest
+    container_name: projet-datamining-adminer
+    ports:
+      - "${ADMINER_PORT:-18080}:8080"   # -> http://localhost:18080  (Système PostgreSQL, serveur postgres, utilisateur et mot de passe du .env, base projet_datamining)
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      - postgres
+
+volumes:
+  ivy-cache:
+  lake-data:
+  pg-data:
